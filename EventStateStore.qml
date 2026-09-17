@@ -14,6 +14,11 @@ Item {
   readonly property string home: Quickshell.env("HOME")
   readonly property string stateDir: root.home + "/.local/state/lookout"
   readonly property string path: root.stateDir + "/events.json"
+  // bin/pubsub-listener.py writes here directly (its own independent copy
+  // of this exact path convention, since it's plain stdlib Python with no
+  // access to this file) whenever an event carries a CameraClipPreview --
+  // not every camera/event has one. See its own module docstring.
+  readonly property string _clipDir: root.stateDir + "/last-event"
 
   readonly property int _maxRecentIds: 200
 
@@ -92,6 +97,41 @@ Item {
   function hasUnseenPersonForDevice(deviceId) {
     var device = root.byDevice[deviceId]
     return !!(device && device.person && device.person.count > 0)
+  }
+
+  // Most recent event across ALL traits for one camera, as
+  // {trait, lastMs}, or null if this camera has never reported one.
+  // markAllSeen() only zeroes counts, not `last`, so this still answers
+  // correctly after the badge has been cleared -- that's the whole point
+  // of keeping `last` separate from `count` in the stored shape.
+  function _sanitizeDeviceId(deviceId) {
+    return String(deviceId).replace(/[^A-Za-z0-9_-]/g, "_")
+  }
+
+  function lastEventClipPath(deviceId) {
+    return root._clipDir + "/" + root._sanitizeDeviceId(deviceId) + ".mp4"
+  }
+
+  // No cache-busting query needed here, unlike the snapshot JPEGs
+  // (BackendManager.snapshotUrl) -- that one exists specifically to defeat
+  // Qt's pixmap cache for a QML `Image` source, which doesn't apply to
+  // QtMultimedia's MediaPlayer/decoder pipeline. Each CameraTile instance
+  // sets this once, at mount time, and gets whatever's on disk then.
+  function lastEventClipUrl(deviceId) {
+    return "file://" + root.lastEventClipPath(deviceId)
+  }
+
+  function lastEventForDevice(deviceId) {
+    var device = root.byDevice[deviceId]
+    if (!device) return null
+    var bestTrait = null
+    var bestLast = 0
+    for (var trait in device) {
+      var last = device[trait].last || 0
+      if (last > bestLast) { bestLast = last; bestTrait = trait }
+    }
+    if (!bestTrait) return null
+    return { trait: bestTrait, lastMs: bestLast }
   }
 
   FileView {

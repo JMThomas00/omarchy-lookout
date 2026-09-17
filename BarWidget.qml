@@ -121,7 +121,29 @@ BarWidget {
     target: eventStateStore
     function onNotifiableEvent(deviceId, trait) {
       root._maybeNotify(deviceId, trait)
+      root._maybeAutoOpenChime(deviceId, trait)
     }
+  }
+
+  // A doorbell press is fundamentally different from motion/person/sound:
+  // someone is standing at the door right now, so per direct request this
+  // jumps straight to the real live view instead of waiting on a bar-badge
+  // click. Reuses backendManager.openFloatingView unchanged -- it already
+  // handles the go2rtc spawn-if-needed path, the "already open" focus
+  // case, and connecting-state UX, so this only needs to decide WHEN to
+  // call it. Gated by the same per-camera "chime" notify toggle
+  // _maybeNotify already honors (a camera with chime notifications off
+  // shouldn't have its live view pop open either) plus its own dedicated
+  // Settings toggle, independent of whether desktop notifications overall
+  // are enabled -- someone might want the auto-open without the popup, or
+  // vice versa.
+  function _maybeAutoOpenChime(deviceId, trait) {
+    if (!settingsStore.autoOpenOnChime) return
+    if (Notify.shortTrait(trait) !== "chime") return
+    var camera = cameraListStore.cameraById(deviceId)
+    if (!camera) return
+    if (camera.notify && camera.notify.chime === false) return
+    backendManager.openFloatingView(deviceId, camera.displayName)
   }
 
   function _maybeNotify(deviceId, trait) {
@@ -135,8 +157,80 @@ BarWidget {
     var title = Notify.notificationTitle(camera.displayName, trait)
     var omarchyPath = Quickshell.env("OMARCHY_PATH")
     var urgency = shortTrait === "person" ? "critical" : "normal"
-    Quickshell.execDetached([omarchyPath + "/bin/omarchy-notification-send",
-      "-u", urgency, "--app-name", "Lookout", title, "Opening Lookout clears this alert"])
+    var args = [omarchyPath + "/bin/omarchy-notification-send", "-u", urgency, "--app-name", "Lookout"]
+
+    if (!settingsStore.attachSnapshot) {
+      args.push(title, "Opening Lookout clears this alert")
+      Quickshell.execDetached(args)
+      return
+    }
+    // A cached snapshot can be badly stale -- possibly from a popup
+    // session long before this event, showing nothing of whoever/whatever
+    // just triggered it. Per direct feedback, a notification fires with a
+    // genuinely fresh snapshot even if that means waiting for it -- the
+    // whole point of a "Person detected" alert is showing the person.
+    root._notifyWithFreshSnapshot(deviceId, args, title, "Opening Lookout clears this alert")
+  }
+
+  // Spins up go2rtc if it isn't already running (an event notification is
+  // exactly as legitimate a reason as opening the popup -- the user turned
+  // this on deliberately in Settings), fetches one fresh snapshot, then
+  // sends the notification with whatever's at snapshotPath afterward
+  // (freshly-fetched on success, whatever was already cached if the fetch
+  // failed -- never nothing, and the notification itself is NEVER lost:
+  // the watchdog below guarantees it still fires even if go2rtc/the fetch
+  // never completes at all).
+  readonly property int _notifyFreshSnapshotTimeoutMs: 35000
+  property int _notifyRefCounter: 0
+
+  function _notifyWithFreshSnapshot(deviceId, argsWithoutImage, title, description) {
+    // A unique ref per call, not per device -- two notifications for the
+    // SAME camera close together (different traits firing within
+    // moments of each other, e.g. motion then person) would otherwise
+    // share one "notify:<deviceId>" ref, and the FIRST one finishing
+    // would release() it out from under the second one still in flight.
+    root._notifyRefCounter += 1
+    var refName = "notify:" + deviceId + ":" + root._notifyRefCounter
+    var settled = false
+    var watchdog = notifyWatchdogComponent.createObject(root)
+
+    function finish() {
+      if (settled) return
+      settled = true
+      backendManager.snapshotFetched.disconnect(onSnapshotFetched)
+      backendManager.runningChanged.disconnect(onRunningChanged)
+      watchdog.triggered.disconnect(finish)
+      watchdog.stop()
+      watchdog.destroy()
+      var args = argsWithoutImage.concat(["--image", backendManager.snapshotPath(deviceId), title, description])
+      Quickshell.execDetached(args)
+      backendManager.release(refName)
+    }
+
+    function onSnapshotFetched(fetchedDeviceId, ok) {
+      if (fetchedDeviceId === deviceId) finish()
+    }
+
+    function onRunningChanged() {
+      if (backendManager.running) {
+        backendManager.runningChanged.disconnect(onRunningChanged)
+        backendManager.fetchSnapshot(deviceId)
+      }
+    }
+
+    backendManager.snapshotFetched.connect(onSnapshotFetched)
+    watchdog.triggered.connect(finish)
+    watchdog.interval = root._notifyFreshSnapshotTimeoutMs
+    watchdog.start()
+
+    backendManager.acquire(refName)
+    if (backendManager.running) backendManager.fetchSnapshot(deviceId)
+    else backendManager.runningChanged.connect(onRunningChanged)
+  }
+
+  Component {
+    id: notifyWatchdogComponent
+    Timer { repeat: false }
   }
 
   // ------------------------------------------------------------------ badge
@@ -165,7 +259,36 @@ BarWidget {
   }
 
   onOpenedChanged: {
-    if (root.opened) eventStateStore.markAllSeen()
+    if (root.opened) {
+      eventStateStore.markAllSeen()
+      root._dismissOutstandingNotifications()
+    }
+  }
+
+  // "Opening Lookout clears this alert" (the notification's own body text)
+  // used to only mean the BADGE -- the toast itself stayed on screen until
+  // clicked, which direct feedback flagged as misleading given what the
+  // text actually says. Found live: this shell's own notification service
+  // (not a separate daemon -- confirmed via `busctl --user status
+  // org.freedesktop.Notifications`, owned by quickshell itself) does NOT
+  // honor the standard freedesktop `CloseNotification` DBus method the way
+  // a spec daemon would (tested directly: the call succeeds with no error,
+  // but the toast stays visible) -- it has its OWN dismiss mechanism
+  // instead, exposed over IPC as `notifications.dismiss(summary)`, which
+  // removes any currently-shown toast whose summary/headline CONTAINS the
+  // given substring. Every notification this plugin sends starts with the
+  // camera's own display name (`Notify.notificationTitle`), so dismissing
+  // by each known camera's name catches all of them without touching an
+  // unrelated notification from another app. `-q`: best-effort, matching
+  // `omarchy-notification-dismiss`'s own use of this same call -- nothing
+  // here should ever surface as a visible error if the shell's IPC isn't
+  // reachable for some reason.
+  function _dismissOutstandingNotifications() {
+    var omarchyPath = Quickshell.env("OMARCHY_PATH")
+    for (var i = 0; i < cameraListStore.cameras.length; i++) {
+      Quickshell.execDetached([omarchyPath + "/bin/omarchy-shell", "-q",
+        "notifications", "dismiss", cameraListStore.cameras[i].displayName])
+    }
   }
 
   visible: true

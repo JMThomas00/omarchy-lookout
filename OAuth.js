@@ -143,6 +143,30 @@ function parseTokenResponse(status, text, previousRefreshToken) {
   }
 }
 
+// Exchanges a stored refresh_token for a fresh access token, in-process
+// (never a subprocess -- same rationale as _exchangeCode in SetupWizard.qml:
+// nothing is safer than never spawning a process for a secret at all). Used
+// by SettingsPanel.qml's "Test connection" button, which needs a live
+// access token on demand and has no long-running listener process of its
+// own to delegate to.
+function refreshAccessToken(clientId, clientSecret, refreshToken, callback) {
+  var body = formBody({
+    client_id: clientId,
+    client_secret: clientSecret,
+    refresh_token: refreshToken,
+    grant_type: "refresh_token"
+  })
+  var xhr = new XMLHttpRequest()
+  xhr.onreadystatechange = function () {
+    if (xhr.readyState !== XMLHttpRequest.DONE) return
+    var result = parseTokenResponse(xhr.status, xhr.responseText, refreshToken)
+    callback(result)
+  }
+  xhr.open("POST", TOKEN_URL)
+  xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded")
+  xhr.send(body)
+}
+
 function successResponse() {
   var body = "<!doctype html><meta charset=\"utf-8\"><title>Lookout</title>"
     + "<style>:root{color-scheme:light dark}body{font-family:system-ui;background:Canvas;color:CanvasText;display:grid;place-items:center;height:100vh;margin:0}"

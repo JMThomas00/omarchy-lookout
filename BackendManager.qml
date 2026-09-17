@@ -96,6 +96,16 @@ Item {
 
   Component { id: _snapshotFetchProcComponent; BoundedProcess {} }
 
+  // Devices with a fetch already in flight -- guards against two callers
+  // (a CameraTile's own retry and a notification's fresh-snapshot request,
+  // or two notifications close together, e.g. motion then person on the
+  // same camera) racing two curl processes against the SAME temp file
+  // path, which could genuinely corrupt each other's write, not just
+  // waste a redundant request. The second caller gets the same eventual
+  // `snapshotFetched` broadcast as everyone else already listening for
+  // this deviceId -- it doesn't need its own fetch to know the outcome.
+  property var _snapshotFetchesInFlight: ({})
+
   // curl downloads to a temp file; only a successful (`&&`-gated) download
   // gets renamed over the real path, so a failed or cancelled fetch never
   // corrupts the last good cached frame. Positional args, not string
@@ -105,6 +115,11 @@ Item {
   // project-wide. 25s deadline: measured go2rtc's own frame.jpeg taking up
   // to ~26s in the worst case against this user's real cameras.
   function fetchSnapshot(deviceId) {
+    if (root._snapshotFetchesInFlight[deviceId]) return
+    var inFlight = Object.assign({}, root._snapshotFetchesInFlight)
+    inFlight[deviceId] = true
+    root._snapshotFetchesInFlight = inFlight
+
     var finalPath = root.snapshotPath(deviceId)
     var tmpPath = finalPath + ".tmp"
     var proc = _snapshotFetchProcComponent.createObject(root, { deadlineSeconds: 28, maxBytes: 4096 })
@@ -114,6 +129,9 @@ Item {
     proc.finishedWith.connect(function (text, tooLarge) {
       var ok = !tooLarge && proc.lastExitCode === 0
       proc.destroy()
+      var next = Object.assign({}, root._snapshotFetchesInFlight)
+      delete next[deviceId]
+      root._snapshotFetchesInFlight = next
       root.snapshotFetched(deviceId, ok)
     })
     proc.running = true
@@ -186,6 +204,43 @@ Item {
       return
     }
     root.acquire("view:" + deviceId)
+    root._markConnecting(deviceId)
+    if (root.running) {
+      root._spawnMpv(deviceId)
+      return
+    }
+    // go2rtc wasn't already warm (no grid popup or other floating view had
+    // acquired it first) -- found live via the doorbell-chime auto-open
+    // feature, which is always a cold call: mpv was being spawned
+    // immediately, right alongside acquire() kicking off go2rtc's own
+    // verify->spawn sequence, and connecting to 127.0.0.1:8554 before
+    // go2rtc was actually listening on it. Confirmed directly (isolated
+    // debug IPC calls + `ps` polling): mpv just exits immediately on
+    // connection-refused rather than retrying, so the window never
+    // appeared and nothing ever surfaced as a visible failure. This path
+    // previously went unnoticed because every existing caller (tile
+    // clicks) only becomes clickable after CameraGridPanel has already
+    // acquired go2rtc on the grid's own Component.onCompleted, so go2rtc
+    // was always already warm by the time a real click could happen.
+    function onBackendStateChanged() {
+      if (root.backendState === "running") {
+        root.backendStateChanged.disconnect(onBackendStateChanged)
+        // The view may have been released (popup closed, user backed out)
+        // while this was waiting on go2rtc -- don't spawn a window for a
+        // request that's no longer wanted.
+        if (!root.connectingDevices[deviceId]) return
+        root._spawnMpv(deviceId)
+      } else if (root.backendState === "error") {
+        root.backendStateChanged.disconnect(onBackendStateChanged)
+        root._clearConnecting(deviceId)
+        root.release("view:" + deviceId)
+        root.floatingViewFailed(root.errorReason || "Could not start the camera bridge")
+      }
+    }
+    root.backendStateChanged.connect(onBackendStateChanged)
+  }
+
+  function _spawnMpv(deviceId) {
     // A fresh Process per call, not a shared/reused instance -- clicking a
     // second tile while the first click's `hyprctl keyword` call was still
     // in flight could silently drop the second command entirely (reassigning
@@ -196,7 +251,6 @@ Item {
     // cause was rapid successive clicks racing this exact shared Process.
     root._runOnce(["hyprctl", "keyword", "windowrule",
       "float, title:^(" + root._mpvTitlePrefix + deviceId + ")$"])
-    root._markConnecting(deviceId)
     var proc = mpvProcComponent.createObject(root, {
       command: ["mpv", root.rtspUrl(deviceId), "--title=" + root._mpvTitlePrefix + deviceId,
         "--force-window=yes", "--really-quiet"]

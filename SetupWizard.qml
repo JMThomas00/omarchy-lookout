@@ -39,6 +39,17 @@ Item {
   property string _oauthState: ""
   property string _accessToken: ""
   property string _gcloudFallbackCommand: ""
+  // Editable on the fallback screen -- the user may have created the
+  // subscription under a different name than what was guessed (by hand,
+  // via `gcloud`, or the Cloud Console UI), and Skip needs to check
+  // whatever name is ACTUALLY correct, not just the original guess.
+  property string _subscriptionNameOverride: ""
+  // True once a Skip has already been through one failed verification --
+  // a second Skip click proceeds unconditionally rather than blocking
+  // forever, matching the original "don't force the user to solve a
+  // possibly permissions-related issue right now" intent, just no longer
+  // silent about it.
+  property bool _skipVerifyFailedOnce: false
 
   readonly property string redirectUri: "http://127.0.0.1:"
     + OAuth.normalizedPort(root.oauthPortText) + "/oauth/callback"
@@ -51,6 +62,8 @@ Item {
     }
     root.errorMessage = ""
     root._callbackHandled = false
+    root._subscriptionNameOverride = ""
+    root._skipVerifyFailedOnce = false
     root.step = "authorizing"
     pkceProc.program = [root.pluginDir + "/bin/pkce.sh"]
     pkceProc.running = true
@@ -72,6 +85,8 @@ Item {
     root._oauthState = ""
     root._accessToken = ""
     root._gcloudFallbackCommand = ""
+    root._subscriptionNameOverride = ""
+    root._skipVerifyFailedOnce = false
     root.errorMessage = ""
     root.step = "credentials"
   }
@@ -224,7 +239,14 @@ Item {
 
   function _createSubscription() {
     root.step = "pubsub"
-    var subscriptionName = root.setupStoreRef.pubsubSubscriptionName || "lookout-events"
+    // Prefers whatever's in the (editable) override field over the stored/
+    // guessed name -- retrySubscription() re-runs this after the user may
+    // have corrected the name on the fallback screen, and this is what
+    // makes that edit actually take effect.
+    if (!root._subscriptionNameOverride) {
+      root._subscriptionNameOverride = root.setupStoreRef.pubsubSubscriptionName || "lookout-events"
+    }
+    var subscriptionName = root._subscriptionNameOverride
     // The Pub/Sub topic lives in the USER's own GCP project, not Google's --
     // Device Access's own "Enable events" step requires you to create it
     // yourself and grant sdm-publisher@googlegroups.com Publisher on it,
@@ -250,10 +272,37 @@ Item {
       })
   }
 
-  function retrySubscription() { root._createSubscription() }
+  function retrySubscription() {
+    root._skipVerifyFailedOnce = false
+    root._createSubscription()
+  }
 
+  // Verifies the subscription actually exists before trusting it --
+  // previously this just recorded whatever name had been guessed/attempted
+  // with no check at all. Found live: a real setup where the user's own
+  // manual subscription creation ended up under a different name than the
+  // guess, so the recorded name pointed at nothing and the listener pulled
+  // a 404 forever, completely silently -- weeks of real camera events with
+  // zero notifications, only caught by manually curling the Pub/Sub API.
+  //
+  // Still never blocks forever, per this button's own "for now" framing:
+  // a second Skip (after one failed verification) proceeds unconditionally.
   function skipSubscription() {
-    root._finish(root.setupStoreRef.pubsubSubscriptionName || "lookout-events")
+    var subscriptionName = root._subscriptionNameOverride
+      || root.setupStoreRef.pubsubSubscriptionName || "lookout-events"
+    if (root._skipVerifyFailedOnce) { root._finish(subscriptionName); return }
+    Sdm.getSubscription(root._accessToken, root.gcpProjectId, subscriptionName,
+      function (ok, status, payload) {
+        if (root.step !== "pubsub") return
+        if (ok) { root._finish(subscriptionName); return }
+        root._skipVerifyFailedOnce = true
+        root._gcloudFallbackCommand = Sdm.gcloudCreateCommand(root.gcpProjectId, subscriptionName,
+          Sdm.normalizeTopicPath(root.gcpProjectId, root.pubsubTopicId))
+        root.errorMessage = "No subscription named \"" + subscriptionName + "\" exists yet in "
+          + root.gcpProjectId + " -- if you created one under a different name, fix it above and "
+          + "try again. Notifications won't work until this points at a real subscription. "
+          + "Click Skip again to continue anyway."
+      })
   }
 
   function _finish(subscriptionName) {
@@ -420,18 +469,39 @@ Item {
         color: Color.muted
         font.family: Style.font.family
         font.pixelSize: Style.font.body
-        text: "Run this once, then Retry (or Skip -- notifications just won't work until this exists):"
+        text: "Run this once, then Retry -- or if you already created a subscription " +
+          "yourself under a different name, fix the name below first:"
       }
       TextField {
         width: parent.width
         readOnly: true
-        text: root._gcloudFallbackCommand
+        text: Sdm.gcloudCreateCommand(root.gcpProjectId, root._subscriptionNameOverride,
+          Sdm.normalizeTopicPath(root.gcpProjectId, root.pubsubTopicId))
         selectByMouse: true
+      }
+      Row {
+        width: parent.width
+        spacing: Style.spacing.sm
+        Text {
+          text: "Subscription name:"
+          color: Color.foreground
+          font.family: Style.font.family
+          font.pixelSize: Style.font.body
+          anchors.verticalCenter: parent.verticalCenter
+        }
+        TextField {
+          width: 220
+          text: root._subscriptionNameOverride
+          onTextChanged: root._subscriptionNameOverride = text
+        }
       }
       Row {
         spacing: Style.spacing.sm
         Button { text: "Retry"; onClicked: root.retrySubscription() }
-        Button { text: "Skip for now"; onClicked: root.skipSubscription() }
+        Button {
+          text: root._skipVerifyFailedOnce ? "Skip anyway" : "Skip for now (verifies first)"
+          onClicked: root.skipSubscription()
+        }
         Button { text: "Cancel -- go back and re-enter information"; onClicked: root.cancelAuthorization() }
       }
     }

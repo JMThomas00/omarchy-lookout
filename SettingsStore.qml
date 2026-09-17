@@ -17,6 +17,12 @@ Item {
   property int idleTeardownSeconds: 15
   // Extra bar-icon tint strength for "person" vs. plain "motion" events.
   property bool strongerTintForPerson: true
+  // A doorbell press is different in kind from motion/person/sound: it's
+  // the one event where someone is standing there waiting on you right
+  // now, so the default here auto-opens the floating live view instead of
+  // just badging the bar -- still gated per-camera by that camera's own
+  // "chime" notify toggle, and off entirely when this is false.
+  property bool autoOpenOnChime: true
   // Thumbnail tile width in pixels; height follows a fixed aspect ratio.
   property int thumbnailWidth: 180
   // "horizontal" (Flow, wraps) or "vertical" (single column).
@@ -32,6 +38,7 @@ Item {
       attachSnapshot: root.attachSnapshot,
       idleTeardownSeconds: root.idleTeardownSeconds,
       strongerTintForPerson: root.strongerTintForPerson,
+      autoOpenOnChime: root.autoOpenOnChime,
       thumbnailWidth: root.thumbnailWidth,
       gridOrientation: root.gridOrientation
     }))
@@ -42,6 +49,7 @@ Item {
   function setAttachSnapshot(value) { root.attachSnapshot = !!value; root._scheduleSave() }
   function setIdleTeardownSeconds(value) { root.idleTeardownSeconds = Math.max(5, Number(value) || 15); root._scheduleSave() }
   function setStrongerTintForPerson(value) { root.strongerTintForPerson = !!value; root._scheduleSave() }
+  function setAutoOpenOnChime(value) { root.autoOpenOnChime = !!value; root._scheduleSave() }
   function setThumbnailWidth(value) {
     root.thumbnailWidth = Math.max(root.minThumbnailWidth, Math.min(root.maxThumbnailWidth, Number(value) || 180))
     root._scheduleSave()
@@ -71,6 +79,7 @@ Item {
       root.attachSnapshot = doc.attachSnapshot !== false
       root.idleTeardownSeconds = Math.max(5, Number(doc.idleTeardownSeconds) || 15)
       root.strongerTintForPerson = doc.strongerTintForPerson !== false
+      root.autoOpenOnChime = doc.autoOpenOnChime !== false
       root.thumbnailWidth = Math.max(root.minThumbnailWidth,
         Math.min(root.maxThumbnailWidth, Number(doc.thumbnailWidth) || 180))
       root.gridOrientation = doc.gridOrientation === "vertical" ? "vertical" : "horizontal"

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "jmthomas00.lookout",
   "name": "Lookout",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Jordan Thomas (JMThomas00)",
   "license": "MIT",
   "description": "Thumbnail grid for your Google Home/Nest cameras. Click a tile for a floating live view; get a bar badge and a desktop notification on motion/person detection, which clears when you open the popup. Requires your own Google Device Access project (Google's one-time $5 enrollment fee applies, not charged by this plugin), go2rtc (AUR: go2rtc-bin) as the WebRTC bridge, and mpv for the floating view -- all installed separately.",

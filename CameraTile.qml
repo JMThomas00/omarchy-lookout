@@ -1,6 +1,8 @@
 import QtQuick
+import QtMultimedia
 import qs.Ui
 import qs.Commons
+import "Notify.js" as Notify
 
 // One camera's thumbnail in the grid: a single frame.jpeg snapshot fetched
 // once per popup-open (via BackendManager.fetchSnapshot), not a continuous
@@ -19,7 +21,12 @@ import qs.Commons
 // thumbnail that still isn't actually live. See
 // [[omarchy_lookout_project]]/[[omarchy_plugin_dev_gotchas]] for the full
 // diagnostic trail (including the earlier, separately-abandoned attempt at
-// genuinely live video via QtMultimedia) if revisiting this.
+// genuinely live video via QtMultimedia) if revisiting this. That failure
+// was specific to a continuous LIVE RTSP source -- QtMultimedia playing a
+// short, already-downloaded, static local mp4 file (the clipPlayer below)
+// is a genuinely different case, confirmed working live before building
+// this: a local test clip went LoadedMedia -> BufferingMedia ->
+// BufferedMedia -> smooth playback to EndOfMedia with zero stalling.
 //
 // The fetched frame is cached to a fixed local file
 // (BackendManager.snapshotPath) that's never deleted, only overwritten on a
@@ -38,9 +45,18 @@ Item {
   required property string displayName
   required property int unseenCount
   required property BackendManager backendManagerRef
+  required property EventStateStore eventStateStoreRef
   property bool connecting: false
   property int tileWidth: 180
   property int tileHeight: 140
+  // {trait, lastMs} from EventStateStore.lastEventForDevice, or null if
+  // this camera has never reported one -- shown in place of the bare "…"
+  // placeholder while waiting on the first snapshot of the popup session,
+  // per direct request, so there's something meaningful to look at during
+  // that wait (which can be several seconds -- see the header comment on
+  // why this plugin doesn't try to hide that latency with a background
+  // relay anymore).
+  property var lastEvent: null
 
   signal clicked()
 
@@ -51,6 +67,7 @@ Item {
   property bool _everReady: false
   property bool _activeIsA: true
   property bool _retriedOnce: false
+  property bool _hasClip: false
 
   // Reloads whichever Image is currently NOT the visible one from disk --
   // safe to call any time, whether or not a fresh fetch has actually
@@ -65,6 +82,15 @@ Item {
   function _requestFreshSnapshot() {
     if (!root.backendManagerRef.running) return
     root.backendManagerRef.fetchSnapshot(root.deviceId)
+  }
+
+  // Only stops the clip player on the FIRST transition to ready -- called
+  // from imgA/imgB's onStatusChanged, which fires on every successful
+  // refresh, not just the first.
+  function _markEverReady() {
+    if (root._everReady) return
+    root._everReady = true
+    if (clipPlayer.playbackState === MediaPlayer.PlayingState) clipPlayer.stop()
   }
 
   Component.onCompleted: {
@@ -111,7 +137,7 @@ Item {
       asynchronous: true
       cache: false
       visible: root._activeIsA && status === Image.Ready
-      onStatusChanged: if (status === Image.Ready) { root._activeIsA = true; root._everReady = true }
+      onStatusChanged: if (status === Image.Ready) { root._activeIsA = true; root._markEverReady() }
     }
 
     Image {
@@ -122,19 +148,76 @@ Item {
       asynchronous: true
       cache: false
       visible: !root._activeIsA && status === Image.Ready
-      onStatusChanged: if (status === Image.Ready) { root._activeIsA = false; root._everReady = true }
+      onStatusChanged: if (status === Image.Ready) { root._activeIsA = false; root._markEverReady() }
+    }
+
+    // The actual clip from the last camera event, looping, while waiting
+    // on the first live snapshot -- per direct request, in place of (not
+    // just alongside) a text-only placeholder wherever a clip exists. Not
+    // every event has one (depends on the camera's own Nest clip-history
+    // support -- see bin/pubsub-listener.py's own comment), so this stays
+    // hidden and _hasClip stays false for a camera that's never provided
+    // one, falling back to the plain "…" dots below.
+    MediaPlayer {
+      id: clipPlayer
+      source: root.eventStateStoreRef.lastEventClipUrl(root.deviceId)
+      videoOutput: clipVideoOutput
+      loops: MediaPlayer.Infinite
+      onMediaStatusChanged: {
+        if (mediaStatus === MediaPlayer.LoadedMedia || mediaStatus === MediaPlayer.BufferedMedia) {
+          root._hasClip = true
+          if (!root._everReady && playbackState !== MediaPlayer.PlayingState) play()
+        } else if (mediaStatus === MediaPlayer.InvalidMedia || mediaStatus === MediaPlayer.NoMedia) {
+          root._hasClip = false
+        }
+      }
+    }
+
+    VideoOutput {
+      id: clipVideoOutput
+      anchors.fill: parent
+      anchors.margins: 2
+      fillMode: VideoOutput.PreserveAspectCrop
+      visible: root._hasClip && !root._everReady
     }
 
     Text {
       anchors.centerIn: parent
-      // Only shown before the very first successful frame ever -- once a
-      // camera has shown anything, it keeps showing that last good frame
-      // rather than reverting to a placeholder on a failed refresh.
-      visible: !root._everReady
+      // Only shown before the very first successful frame ever, and only
+      // when there's no clip to show instead -- once a camera has shown
+      // anything, it keeps showing that last good frame/clip rather than
+      // reverting to a placeholder on a failed refresh.
+      visible: !root._everReady && !root._hasClip
       text: "…"
       color: Color.muted
       font.family: Style.font.family
       font.pixelSize: Style.font.title
+    }
+
+    // The last known event for this camera, as a corner caption -- shown
+    // whether or not a clip is playing behind it (top-left is otherwise
+    // unused: the name label already owns bottom-left, the unseen badge
+    // owns top-right).
+    Rectangle {
+      visible: !root._everReady && !!root.lastEvent
+      anchors.left: parent.left
+      anchors.top: parent.top
+      anchors.margins: 4
+      radius: 3
+      color: "#B0000000"
+      width: lastEventText.implicitWidth + 8
+      height: lastEventText.implicitHeight + 4
+
+      Text {
+        id: lastEventText
+        anchors.centerIn: parent
+        text: root.lastEvent
+          ? (Notify.labelForShortTrait(root.lastEvent.trait) + " · " + Notify.timeAgo(root.lastEvent.lastMs, Date.now()))
+          : ""
+        color: "white"
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+      }
     }
 
     Rectangle {

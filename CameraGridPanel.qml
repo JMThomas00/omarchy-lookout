@@ -74,6 +74,15 @@ Item {
       deviceId: modelData.deviceId
       displayName: modelData.displayName
       unseenCount: root.eventStateStoreRef.unseenCountForDevice(modelData.deviceId)
+      // Shown in place of the "…" placeholder while this tile is waiting
+      // on its first snapshot of the popup session -- per direct request,
+      // so there's something meaningful to look at during that wait
+      // instead of blank dots. Reactive the same way unseenCount already
+      // is: a function call read directly in the binding, which QML still
+      // tracks as depending on whatever properties that function reads
+      // internally (here, eventStateStoreRef.byDevice).
+      lastEvent: root.eventStateStoreRef.lastEventForDevice(modelData.deviceId)
+      eventStateStoreRef: root.eventStateStoreRef
       // One on-open snapshot, not a continuous feed -- see CameraTile.qml's
       // own header comment and [[omarchy_lookout_project]] for why (Nest's
       // own snapshot latency is the real bottleneck; a background relay
@@ -100,10 +109,19 @@ Item {
   // Button (it was rendering a theme blue, standing out from the rest of
   // the bar's white icons), and a Button's palette isn't guaranteed to
   // honor a per-instance color override across every style Omarchy might
-  // apply. The gear character itself also needs the trailing U+FE0E
-  // ("text presentation" variation selector) -- without it, several fonts
-  // render "⚙" as a fixed-color emoji glyph that ignores `color` entirely
-  // (confirmed live: `color: "white"` alone had no visible effect at all).
+  // apply.
+  //
+  // A real icon glyph, not the "⚙" character -- even with the U+FE0E
+  // "text presentation" variation selector (tried first), this font still
+  // renders it with a faint blue-gray tint baked into its own color-glyph
+  // table, confirmed live side by side against a plain icon glyph in an
+  // isolated test window (screenshot comparison, not just code reading).
+  // U+F013 is nf-fa-cog -- the same Font Awesome Nerd Font set
+  // BarWidget.qml's own bar icon uses (nf-fa-video_camera, U+F03D) -- and
+  // `Style.font.family` resolves to "monospace", which `fc-match` confirms
+  // is JetBrainsMono Nerd Font on this system, so no extra font needs
+  // bundling or requiring: nerd-font glyphs are plain vector icons, not
+  // color emoji, so `color` actually applies.
   Item {
     id: settingsButton
     anchors.top: parent.top
@@ -115,7 +133,7 @@ Item {
     Text {
       id: gearText
       anchors.centerIn: parent
-      text: "⚙︎"
+      text: ""
       color: "white"
       font.family: Style.font.family
       font.pixelSize: Style.font.title

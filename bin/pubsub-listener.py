@@ -27,16 +27,30 @@ unrecoverable local error (bad stdin, no network at all after all
 attempts), 2 specifically on `invalid_grant` from a refresh attempt --
 the caller (PubSubListener.qml) treats that one as "sign-in expired,
 please re-authorize" rather than retrying forever.
+
+Clip previews: a message that carries a CameraClipPreview.ClipPreview
+trait (not every camera/event does -- it depends on the camera's own Nest
+subscription/feature support) gets its short mp4 clip downloaded right
+here, synchronously, using the same bearer access token as everything
+else -- the previewUrl is short-lived, so this can't be deferred to
+whenever the popup next opens. Saved to
+~/.local/state/lookout/last-event/<deviceId>.mp4 (temp file + atomic
+rename), overwritten by the next one, never accumulated. Best-effort: a
+failed download is logged and otherwise ignored, never allowed to block
+or drop the actual notification event it arrived alongside.
 """
 
 from __future__ import annotations
 
 import base64
 import json
+import os
+import re
 import signal
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -52,8 +66,30 @@ MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_MESSAGES_PER_PULL = 20
 # Drain quickly while there's a backlog; otherwise idle at this cadence.
 EMPTY_PULL_SLEEP_SECONDS = 12
+# How often a persistent pull failure (wrong subscription, permissions,
+# ...) gets re-logged, so a real misconfiguration stays discoverable
+# without flooding the journal on every 12s retry.
+PULL_ERROR_LOG_INTERVAL_SECONDS = 600
 HTTP_TIMEOUT_SECONDS = 20
 TOKEN_REFRESH_MARGIN_SECONDS = 300
+
+# CameraClipPreview.ClipPreview's previewUrl serves a short (SDM docs: "10
+# frame") mp4 clip of the event -- generous but still bounded, since this is
+# a real, externally-influenced download (Google's own CDN, but still not
+# something to trust unboundedly).
+MAX_CLIP_BYTES = 8 * 1024 * 1024
+CLIP_HTTP_TIMEOUT_SECONDS = 15
+LAST_EVENT_CLIP_DIR = os.path.expanduser("~/.local/state/lookout/last-event")
+# previewUrl comes from the Pub/Sub message body -- externally-influenced
+# content, even though reaching this code at all already requires access to
+# this user's own GCP subscription. Restricting to exactly the one host
+# Google's own docs specify (README.md's Security > Network boundary lists
+# it) before ever attaching the live Bearer token is what keeps a
+# malformed/spoofed previewUrl from being able to exfiltrate that token to
+# an arbitrary host -- the fix a code-review pass on this exact pattern
+# would ask for (see linecast's own review history: "validate full argument
+# shapes, not just which function was called").
+_ALLOWED_CLIP_HOST = "nest-camera-frontend.googleapis.com"
 
 _stop_requested = False
 
@@ -177,13 +213,16 @@ def _device_id_from_resource_name(name):
     return str(name or "").rstrip("/").rsplit("/", 1)[-1]
 
 
-def _process_message(message):
-    """Yield zero or more bounded event dicts for one Pub/Sub message."""
+def _decode_message_body(message):
     try:
         data_raw = base64.b64decode(message.get("data", ""))
-        body = json.loads(data_raw)
+        return json.loads(data_raw)
     except (ValueError, TypeError, json.JSONDecodeError):
-        return
+        return None
+
+
+def _process_message(body):
+    """Yield zero or more bounded event dicts for one already-decoded message body."""
     resource_update = body.get("resourceUpdate") or {}
     device_id = _device_id_from_resource_name(resource_update.get("name"))
     if not device_id:
@@ -206,6 +245,63 @@ def _process_message(message):
         }
 
 
+# Device IDs are Google's own opaque strings, but this is what ends up
+# forming a local file path -- filtered the same way BackendManager.qml's
+# own _sanitizeDeviceId does for the exact same reason, not because a real
+# device id has ever contained anything else.
+_SAFE_DEVICE_ID = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def _sanitize_device_id(device_id):
+    return _SAFE_DEVICE_ID.sub("_", str(device_id or ""))
+
+
+def _extract_clip_preview(body):
+    """Returns (deviceId, previewUrl) if this message carries a clip preview, else (None, None)."""
+    resource_update = body.get("resourceUpdate") or {}
+    device_id = _device_id_from_resource_name(resource_update.get("name"))
+    if not device_id:
+        return None, None
+    events = resource_update.get("events") or {}
+    clip = events.get("sdm.devices.events.CameraClipPreview.ClipPreview")
+    preview_url = (clip or {}).get("previewUrl")
+    if not device_id or not preview_url:
+        return None, None
+    return device_id, str(preview_url)
+
+
+def _download_clip_preview(preview_url, access_token, device_id):
+    """Best-effort: a clip download failing must never interrupt the pull
+    loop or drop the actual notification event it arrived alongside --
+    this is a nice-to-have visual, not something to block on. previewUrl
+    is authenticated with the SAME bearer access token as the SDM API
+    itself, per Google's own docs (not Basic Auth against the OAuth client
+    credentials, which was the first, wrong assumption here -- confirmed
+    live: Basic Auth got a 401 "rejected", Bearer got a 404 "not found,
+    but at least recognized" against an already-expired test URL)."""
+    parsed = urllib.parse.urlsplit(preview_url)
+    if parsed.scheme != "https" or parsed.hostname != _ALLOWED_CLIP_HOST:
+        _log(f"clip preview for {device_id} had an unexpected URL host, refusing to attach a token to it")
+        return
+    try:
+        os.makedirs(LAST_EVENT_CLIP_DIR, exist_ok=True, mode=0o700)
+        request = urllib.request.Request(
+            preview_url, headers={"Authorization": f"Bearer {access_token}"},
+        )
+        with urllib.request.urlopen(request, timeout=CLIP_HTTP_TIMEOUT_SECONDS) as response:
+            raw = response.read(MAX_CLIP_BYTES + 1)
+        if len(raw) > MAX_CLIP_BYTES:
+            _log(f"clip preview for {device_id} exceeded the size budget, discarded")
+            return
+        final_path = os.path.join(LAST_EVENT_CLIP_DIR, _sanitize_device_id(device_id) + ".mp4")
+        tmp_path = final_path + ".tmp"
+        with open(tmp_path, "wb") as f:
+            f.write(raw)
+        os.replace(tmp_path, final_path)  # atomic on the same filesystem
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        _log(f"clip preview download failed for {device_id}: {error}")
+
+
 def run(credentials):
     tokens = TokenManager(
         credentials["client_id"], credentials["client_secret"], credentials["refresh_token"],
@@ -220,6 +316,8 @@ def run(credentials):
 
     _emit({"type": "ready"})
 
+    last_pull_error_logged_at = 0.0
+
     while not _stop_requested:
         if not tokens.ensure_fresh():
             return 2 if tokens.fatal_auth_error else 1
@@ -232,6 +330,21 @@ def run(credentials):
                 return 2 if tokens.fatal_auth_error else 1
             continue
         if status != 200 or payload is None:
+            # Found live: a pull failure here (wrong/nonexistent
+            # subscription name, permission error, ...) used to be
+            # completely silent -- this loop just slept and retried
+            # forever with nothing in any log to explain why no events
+            # were ever arriving. A 404 on the wrong subscription name
+            # went unnoticed for weeks of real camera events before being
+            # found by manually querying the Pub/Sub API directly.
+            # Throttled, not logged every attempt, so a genuinely broken
+            # config doesn't spam the journal indefinitely.
+            now = time.monotonic()
+            if now - last_pull_error_logged_at > PULL_ERROR_LOG_INTERVAL_SECONDS:
+                _log(f"pull failed (status={status}) against subscription "
+                     f"'{subscription}' in project '{project}' -- check that this "
+                     f"subscription actually exists and is bound to the right topic")
+                last_pull_error_logged_at = now
             time.sleep(EMPTY_PULL_SLEEP_SECONDS)
             continue
 
@@ -244,8 +357,19 @@ def run(credentials):
         for received in messages:
             ack_id = received.get("ackId")
             message = received.get("message") or {}
-            for event in _process_message(message):
-                _emit(event)
+            body = _decode_message_body(message)
+            if body is not None:
+                for event in _process_message(body):
+                    _emit(event)
+                # Best-effort and synchronous, deliberately: previewUrl is
+                # short-lived (SDM docs don't state an exact TTL, but it's
+                # clearly minutes, not hours -- confirmed live against a
+                # ~7-hour-old one), so this has to happen now, with the
+                # access token already in hand, not deferred to whenever
+                # the popup next opens.
+                clip_device_id, preview_url = _extract_clip_preview(body)
+                if clip_device_id and preview_url:
+                    _download_clip_preview(preview_url, tokens.access_token, clip_device_id)
             if ack_id:
                 ack_ids.append(ack_id)
 

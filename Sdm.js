@@ -105,6 +105,21 @@ function createPullSubscription(accessToken, gcpProjectId, subscriptionName, top
   xhr.send(JSON.stringify({ topic: topicName }))
 }
 
+// Used to VERIFY a subscription name actually resolves to something real
+// before trusting it -- see SetupWizard.qml's skipSubscription() for why:
+// found live that "Skip" previously just recorded whatever name had been
+// GUESSED/attempted, with no check that a subscription by that name
+// actually existed. In this exact case the user's own manual
+// gcloud/Console subscription creation ended up named differently than
+// the guess, so the recorded name pointed at nothing -- the listener
+// pulled a 404 forever, silently, with zero visible notifications for
+// weeks of real camera events.
+function getSubscription(accessToken, gcpProjectId, subscriptionName, callback) {
+  var url = PUBSUB_BASE + "/projects/" + encodeURIComponent(gcpProjectId)
+    + "/subscriptions/" + encodeURIComponent(subscriptionName)
+  _request("GET", url, accessToken, undefined, callback)
+}
+
 function gcloudCreateCommand(gcpProjectId, subscriptionName, topicName) {
   return "gcloud pubsub subscriptions create " + subscriptionName
     + " --topic=" + topicName + " --project=" + gcpProjectId
