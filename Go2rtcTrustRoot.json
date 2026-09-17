@@ -1,0 +1,17 @@
+{
+  "_comment": "Generated once from the official upstream release binaries at https://github.com/AlexxIT/go2rtc/releases/tag/v1.9.14 -- downloaded directly over HTTPS from github.com and hashed immediately, never taken from an installed copy's own --version output or from the AUR package's own checksum file. BackendManager.qml re-verifies a candidate go2rtc binary against these hashes before every single spawn; see README.md's Security > Backend binding section for why this is a committed trust root rather than a check against the installed environment's own metadata.",
+  "version": "1.9.14",
+  "sourceRepo": "https://github.com/AlexxIT/go2rtc",
+  "generatedAt": "2026-09-16",
+  "assets": {
+    "linux_x86_64": {
+      "sha256": "32d616af226bd731678ffde328b94cfb94e30339bfefc469cfb76323144615a6",
+      "sourceUrl": "https://github.com/AlexxIT/go2rtc/releases/download/v1.9.14/go2rtc_linux_amd64"
+    },
+    "linux_aarch64": {
+      "sha256": "359fabade8a7a51e81a55fe6df6b0ef81764a5e1d63179577534eaaa71904b50",
+      "sourceUrl": "https://github.com/AlexxIT/go2rtc/releases/download/v1.9.14/go2rtc_linux_arm64"
+    }
+  },
+  "supportedInstall": "AUR go2rtc-bin only -- it ships this exact upstream binary byte-for-byte. AUR go2rtc (built from source with the local toolchain) will not hash-match and is refused by design; see README.md."
+}
