@@ -6,6 +6,8 @@ floating full-size live view, and get a bar badge plus a desktop
 notification whenever a camera sees motion or a person -- which clears the
 moment you open the grid.
 
+![Lookout thumbnail grid showing three live camera feeds with the settings gear icon in the corner](preview.png)
+
 ## Features
 
 - **One-time sign-in.** Associate your Google account once during setup;
