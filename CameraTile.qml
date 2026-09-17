@@ -160,7 +160,14 @@ Item {
     // one, falling back to the plain "…" dots below.
     MediaPlayer {
       id: clipPlayer
-      source: root.eventStateStoreRef.lastEventClipUrl(root.deviceId)
+      // Gated on lastEvent, not unconditional -- a camera that has never
+      // recorded any event yet (the common case right after first setup)
+      // has no clip file to even attempt, and binding the URL anyway just
+      // produces a pointless FFmpeg "No such file or directory" warning in
+      // the journal on every popup open. A camera WITH an event but no
+      // clip for that specific event type still hits the same fallback
+      // once, which onMediaStatusChanged below already handles cleanly.
+      source: root.lastEvent ? root.eventStateStoreRef.lastEventClipUrl(root.deviceId) : ""
       videoOutput: clipVideoOutput
       loops: MediaPlayer.Infinite
       onMediaStatusChanged: {

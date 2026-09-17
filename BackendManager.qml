@@ -192,6 +192,18 @@ Item {
     onExited: function (exitCode) { root.mpvAvailable = exitCode === 0 }
   }
 
+  // Devices with an openFloatingView() call already acquired and waiting on
+  // go2rtc to become ready -- distinct from _floatingViewByDevice, which
+  // only gets an entry once _spawnMpv actually runs. Found on review (no
+  // live report): without this, a second openFloatingView for the SAME
+  // device landing in that gap (a rapid double-click, or a doorbell chime
+  // racing a manual tile click) would fall through the
+  // `existing && existing.running` check below -- since existing is still
+  // undefined at that point -- and register a second backendStateChanged
+  // listener, spawning two mpv processes for the same camera once go2rtc
+  // came up.
+  property var _pendingFloatingViews: ({})
+
   function openFloatingView(deviceId, displayName) {
     if (!root.mpvAvailable) {
       root.floatingViewFailed("mpv is not installed -- install it to view a full-size camera feed")
@@ -203,6 +215,7 @@ Item {
         "title:^(" + root._mpvTitlePrefix + deviceId + ")$"])
       return
     }
+    if (root._pendingFloatingViews[deviceId]) return
     root.acquire("view:" + deviceId)
     root._markConnecting(deviceId)
     if (root.running) {
@@ -222,9 +235,13 @@ Item {
     // clicks) only becomes clickable after CameraGridPanel has already
     // acquired go2rtc on the grid's own Component.onCompleted, so go2rtc
     // was always already warm by the time a real click could happen.
+    var pending = Object.assign({}, root._pendingFloatingViews)
+    pending[deviceId] = true
+    root._pendingFloatingViews = pending
     function onBackendStateChanged() {
       if (root.backendState === "running") {
         root.backendStateChanged.disconnect(onBackendStateChanged)
+        root._clearPendingFloatingView(deviceId)
         // The view may have been released (popup closed, user backed out)
         // while this was waiting on go2rtc -- don't spawn a window for a
         // request that's no longer wanted.
@@ -232,12 +249,20 @@ Item {
         root._spawnMpv(deviceId)
       } else if (root.backendState === "error") {
         root.backendStateChanged.disconnect(onBackendStateChanged)
+        root._clearPendingFloatingView(deviceId)
         root._clearConnecting(deviceId)
         root.release("view:" + deviceId)
         root.floatingViewFailed(root.errorReason || "Could not start the camera bridge")
       }
     }
     root.backendStateChanged.connect(onBackendStateChanged)
+  }
+
+  function _clearPendingFloatingView(deviceId) {
+    if (!root._pendingFloatingViews[deviceId]) return
+    var pending = Object.assign({}, root._pendingFloatingViews)
+    delete pending[deviceId]
+    root._pendingFloatingViews = pending
   }
 
   function _spawnMpv(deviceId) {

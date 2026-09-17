@@ -52,6 +52,15 @@ Item {
     root.credentialStoreRef.lookupFinished.disconnect(root._onCredentialsForRun)
     if (!root.active) return
     if (!ok || !credentials) {
+      // No process ever started this cycle -- reset _startedAtMs to now so
+      // _scheduleRestart's "was this a healthy long run" check evaluates
+      // against a fresh mark, not whatever a much-earlier successful run
+      // left behind. Found on review: without this, a persistent keyring
+      // failure (e.g. gnome-keyring not running) would see
+      // `Date.now() - _startedAtMs` stay well past the 60s healthy
+      // threshold forever, resetting backoff to its shortest step every
+      // time and retrying every 5s indefinitely instead of backing off.
+      root._startedAtMs = Date.now()
       root._scheduleRestart()
       return
     }
