@@ -481,22 +481,24 @@ Item {
   function _pollReadiness() {
     if (!go2rtcProc.running) return
     root._readinessAttempt += 1
-    var xhr = new XMLHttpRequest()
-    xhr.onreadystatechange = function () {
-      if (xhr.readyState !== XMLHttpRequest.DONE) return
-      if (!go2rtcProc.running) return
-      if (xhr.status >= 200 && xhr.status < 300) {
-        root.backendState = "running"
-        return
-      }
-      root._scheduleReadinessRetry()
-    }
-    xhr.onerror = function () {
-      if (go2rtcProc.running) root._scheduleReadinessRetry()
-    }
-    xhr.open("GET", "http://127.0.0.1:1984/api/streams")
-    xhr.send()
+    // A per-attempt deadline, not just the overall attempt cap below: a
+    // go2rtc that accepted the connection but never answered would
+    // otherwise leave this poll chain (and backendState, stuck at
+    // "starting") waiting forever, since no retry is scheduled until a
+    // response or an error actually arrives. A timeout counts as a failed
+    // attempt like any other (status 0).
+    http.request({ method: "GET", url: "http://127.0.0.1:1984/api/streams", timeoutMs: 3000 },
+      function (status) {
+        if (!go2rtcProc.running) return
+        if (status >= 200 && status < 300) {
+          root.backendState = "running"
+          return
+        }
+        root._scheduleReadinessRetry()
+      })
   }
+
+  HttpRequester { id: http }
 
   function _scheduleReadinessRetry() {
     if (root._readinessAttempt >= root._readinessMaxAttempts) {

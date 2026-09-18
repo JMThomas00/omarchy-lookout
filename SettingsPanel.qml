@@ -42,18 +42,21 @@ Item {
   function _onTestCredentials(ok, credentials) {
     root.credentialStoreRef.lookupFinished.disconnect(root._onTestCredentials)
     if (!ok) { root._testFailed("No saved Google credentials found. Try \"Re-run setup\" below."); return }
-    OAuth.refreshAccessToken(credentials.clientId, credentials.clientSecret, credentials.refreshToken,
+    OAuth.refreshAccessToken(http, credentials.clientId, credentials.clientSecret, credentials.refreshToken,
       function (result) {
         if (!result.ok) { root._testFailed("Could not refresh Google sign-in: " + result.error); return }
-        Sdm.getSubscription(result.accessToken, root.setupStoreRef.gcpProjectId, root.setupStoreRef.pubsubSubscriptionName,
+        Sdm.getSubscription(http, result.accessToken, root.setupStoreRef.gcpProjectId, root.setupStoreRef.pubsubSubscriptionName,
           function (ok2, status, payload) {
             if (ok2) { root._testSucceeded(); return }
-            var message = payload && payload.error && payload.error.message ? payload.error.message
-              : "the subscription could not be reached"
-            root._testFailed("Status " + status + ": " + message)
+            root._testFailed((status > 0 ? "Status " + status + ": " : "")
+              + OAuth.responseError(status, payload, "the subscription could not be reached"))
           })
       })
   }
+
+  // Both requests above have a hard deadline and abort path, so this button
+  // can never get stuck on "Testing…" against a stalled peer.
+  HttpRequester { id: http }
 
   function _testSucceeded() {
     root._testingConnection = false

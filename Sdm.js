@@ -5,6 +5,13 @@
 // function here takes an already-valid access token and calls back with
 // (ok, result) -- none of these ever touch a subprocess, so a bearer token
 // never has a chance to land on any process's argv or environment.
+//
+// Every function's first argument is an HttpRequester.qml instance, which is
+// what actually makes the request -- it owns the hard deadline and abort
+// path (a plain XMLHttpRequest here would have neither; see that file for
+// why this can't just live in this .pragma library itself). A timeout or
+// network failure comes back through the same callback as any other
+// failure: ok=false, status=0, payload=null.
 
 var SDM_BASE = "https://smartdevicemanagement.googleapis.com/v1"
 var PUBSUB_BASE = "https://pubsub.googleapis.com/v1"
@@ -15,22 +22,19 @@ var CAMERA_TYPES = [
   "sdm.devices.types.DISPLAY"
 ]
 
-function _request(method, url, accessToken, body, callback) {
-  var xhr = new XMLHttpRequest()
-  xhr.onreadystatechange = function () {
-    if (xhr.readyState !== XMLHttpRequest.DONE) return
+function _request(http, method, url, accessToken, body, callback) {
+  var headers = { "Authorization": "Bearer " + accessToken }
+  if (body !== undefined) headers["Content-Type"] = "application/json"
+  http.request({
+    method: method,
+    url: url,
+    headers: headers,
+    body: body === undefined ? undefined : JSON.stringify(body)
+  }, function (status, text) {
     var payload = null
-    try { payload = JSON.parse(xhr.responseText || "{}") } catch (e) { payload = null }
-    callback(xhr.status >= 200 && xhr.status < 300, xhr.status, payload)
-  }
-  xhr.open(method, url)
-  xhr.setRequestHeader("Authorization", "Bearer " + accessToken)
-  if (body !== undefined) {
-    xhr.setRequestHeader("Content-Type", "application/json")
-    xhr.send(JSON.stringify(body))
-  } else {
-    xhr.send()
-  }
+    try { payload = JSON.parse(text || "{}") } catch (e) { payload = null }
+    callback(status >= 200 && status < 300, status, payload)
+  })
 }
 
 // Resolves each camera's supported live-stream protocol (webrtc vs rtsp)
@@ -38,9 +42,9 @@ function _request(method, url, accessToken, body, callback) {
 // supportedProtocols: ["WEB_RTC"] or ["RTSP"] depending on which app the
 // camera is migrated to (see README's Requirements section). A camera with
 // neither trait present is skipped: it isn't a live-viewable camera at all.
-function listCameras(accessToken, deviceAccessProjectId, callback) {
+function listCameras(http, accessToken, deviceAccessProjectId, callback) {
   var url = SDM_BASE + "/enterprises/" + encodeURIComponent(deviceAccessProjectId) + "/devices"
-  _request("GET", url, accessToken, undefined, function (ok, status, payload) {
+  _request(http, "GET", url, accessToken, undefined, function (ok, status, payload) {
     if (!ok || !payload) { callback(false, status, [], payload); return }
     var devices = payload.devices || []
     var cameras = []
@@ -84,25 +88,12 @@ function normalizeTopicPath(gcpProjectId, topicIdOrPath) {
   return "projects/" + gcpProjectId + "/topics/" + trimmed
 }
 
-function createPullSubscription(accessToken, gcpProjectId, subscriptionName, topicName, callback) {
-  var url = PUBSUB_BASE + "/projects/" + encodeURIComponent(gcpProjectId)
-    + "/subscriptions/" + encodeURIComponent(subscriptionName) + ":create"
+function createPullSubscription(http, accessToken, gcpProjectId, subscriptionName, topicName, callback) {
   // Google's subscriptions.create is actually PUT keyed by the full
-  // resource name, not a POST with a body id -- passing "name" in the body
-  // documents intent even though the URL is what addresses it.
+  // resource name, not a POST with a body id.
   var putUrl = PUBSUB_BASE + "/projects/" + encodeURIComponent(gcpProjectId)
     + "/subscriptions/" + encodeURIComponent(subscriptionName)
-  var xhr = new XMLHttpRequest()
-  xhr.onreadystatechange = function () {
-    if (xhr.readyState !== XMLHttpRequest.DONE) return
-    var payload = null
-    try { payload = JSON.parse(xhr.responseText || "{}") } catch (e) { payload = null }
-    callback(xhr.status >= 200 && xhr.status < 300, xhr.status, payload)
-  }
-  xhr.open("PUT", putUrl)
-  xhr.setRequestHeader("Authorization", "Bearer " + accessToken)
-  xhr.setRequestHeader("Content-Type", "application/json")
-  xhr.send(JSON.stringify({ topic: topicName }))
+  _request(http, "PUT", putUrl, accessToken, { topic: topicName }, callback)
 }
 
 // Used to VERIFY a subscription name actually resolves to something real
@@ -114,10 +105,10 @@ function createPullSubscription(accessToken, gcpProjectId, subscriptionName, top
 // the guess, so the recorded name pointed at nothing -- the listener
 // pulled a 404 forever, silently, with zero visible notifications for
 // weeks of real camera events.
-function getSubscription(accessToken, gcpProjectId, subscriptionName, callback) {
+function getSubscription(http, accessToken, gcpProjectId, subscriptionName, callback) {
   var url = PUBSUB_BASE + "/projects/" + encodeURIComponent(gcpProjectId)
     + "/subscriptions/" + encodeURIComponent(subscriptionName)
-  _request("GET", url, accessToken, undefined, callback)
+  _request(http, "GET", url, accessToken, undefined, callback)
 }
 
 function gcloudCreateCommand(gcpProjectId, subscriptionName, topicName) {

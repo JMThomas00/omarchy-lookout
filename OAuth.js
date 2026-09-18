@@ -120,6 +120,7 @@ function responseError(status, payload, fallback) {
       message = payload.message || ""
     }
   }
+  if (!message && status === 0) message = "No response from Google (the request timed out or the network is unreachable)"
   if (!message) message = fallback || "Google could not complete this request"
   return redact(message)
 }
@@ -143,28 +144,47 @@ function parseTokenResponse(status, text, previousRefreshToken) {
   }
 }
 
-// Exchanges a stored refresh_token for a fresh access token, in-process
-// (never a subprocess -- same rationale as _exchangeCode in SetupWizard.qml:
-// nothing is safer than never spawning a process for a secret at all). Used
-// by SettingsPanel.qml's "Test connection" button, which needs a live
-// access token on demand and has no long-running listener process of its
-// own to delegate to.
-function refreshAccessToken(clientId, clientSecret, refreshToken, callback) {
-  var body = formBody({
+// The one place either token grant (authorization_code during setup,
+// refresh_token afterward) is actually sent, in-process -- never a
+// subprocess, since nothing is safer than never spawning a process for a
+// secret at all. `http` is an HttpRequester.qml instance, which owns the
+// hard deadline and abort path (a plain XMLHttpRequest here would have
+// neither); a timeout or network failure comes back through `callback` as
+// an ordinary {ok: false, error} result, same as any other failure.
+function _postTokenRequest(http, fields, previousRefreshToken, callback) {
+  http.request({
+    method: "POST",
+    url: TOKEN_URL,
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: formBody(fields)
+  }, function (status, text) {
+    callback(parseTokenResponse(status, text, previousRefreshToken))
+  })
+}
+
+// Exchanges a stored refresh_token for a fresh access token. Used by
+// SettingsPanel.qml's "Test connection" button, which needs a live access
+// token on demand and has no long-running listener process of its own to
+// delegate to.
+function refreshAccessToken(http, clientId, clientSecret, refreshToken, callback) {
+  _postTokenRequest(http, {
     client_id: clientId,
     client_secret: clientSecret,
     refresh_token: refreshToken,
     grant_type: "refresh_token"
-  })
-  var xhr = new XMLHttpRequest()
-  xhr.onreadystatechange = function () {
-    if (xhr.readyState !== XMLHttpRequest.DONE) return
-    var result = parseTokenResponse(xhr.status, xhr.responseText, refreshToken)
-    callback(result)
-  }
-  xhr.open("POST", TOKEN_URL)
-  xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded")
-  xhr.send(body)
+  }, refreshToken, callback)
+}
+
+// The setup wizard's one-time authorization_code -> tokens exchange.
+function exchangeAuthorizationCode(http, clientId, clientSecret, code, codeVerifier, redirectUri, callback) {
+  _postTokenRequest(http, {
+    client_id: clientId,
+    client_secret: clientSecret,
+    code: code,
+    code_verifier: codeVerifier,
+    grant_type: "authorization_code",
+    redirect_uri: redirectUri
+  }, "", callback)
 }
 
 function successResponse() {

@@ -91,6 +91,12 @@ Item {
     root.step = "credentials"
   }
 
+  // Every credential-bearing request below (token exchange, camera
+  // discovery, subscription create/verify) goes through this -- each has a
+  // hard deadline and abort path, so a stalled peer fails the step through
+  // the ordinary error path instead of leaving the wizard hanging.
+  HttpRequester { id: http }
+
   BoundedProcess {
     id: pkceProc
     deadlineSeconds: 8
@@ -184,26 +190,13 @@ Item {
     root._pkceVerifier = ""
     root._pkceChallenge = ""
     root._oauthState = ""
-    var body = OAuth.formBody({
-      client_id: root.clientId,
-      client_secret: root.clientSecret,
-      code: code,
-      code_verifier: verifier,
-      grant_type: "authorization_code",
-      redirect_uri: root.redirectUri
-    })
-    var xhr = new XMLHttpRequest()
-    xhr.onreadystatechange = function () {
-      if (xhr.readyState !== XMLHttpRequest.DONE) return
-      if (root.step !== "exchanging") return
-      var result = OAuth.parseTokenResponse(xhr.status, xhr.responseText, "")
-      if (!result.ok) { root._fail(result.error); return }
-      root._accessToken = result.accessToken
-      root._storeCredentials(result.refreshToken)
-    }
-    xhr.open("POST", OAuth.TOKEN_URL)
-    xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded")
-    xhr.send(body)
+    OAuth.exchangeAuthorizationCode(http, root.clientId, root.clientSecret, code, verifier, root.redirectUri,
+      function (result) {
+        if (root.step !== "exchanging") return
+        if (!result.ok) { root._fail(result.error); return }
+        root._accessToken = result.accessToken
+        root._storeCredentials(result.refreshToken)
+      })
   }
 
   function _storeCredentials(refreshToken) {
@@ -224,7 +217,7 @@ Item {
 
   function _discoverCameras() {
     root.step = "discovering"
-    Sdm.listCameras(root._accessToken, root.deviceAccessProjectId, function (ok, status, cameras, payload) {
+    Sdm.listCameras(http, root._accessToken, root.deviceAccessProjectId, function (ok, status, cameras, payload) {
       if (root.step !== "discovering") return
       if (!ok) {
         root._fail("Could not list your cameras (status " + status + "): "
@@ -261,7 +254,7 @@ Item {
     // asked for here would otherwise get it doubled into a malformed
     // resource name (found live: a real 400 from Pub/Sub).
     var topicPath = Sdm.normalizeTopicPath(root.gcpProjectId, root.pubsubTopicId)
-    Sdm.createPullSubscription(root._accessToken, root.gcpProjectId, subscriptionName, topicPath,
+    Sdm.createPullSubscription(http, root._accessToken, root.gcpProjectId, subscriptionName, topicPath,
       function (ok, status, payload) {
         if (root.step !== "pubsub") return
         // 409 = already exists from a previous setup run -- treat as success.
@@ -291,7 +284,7 @@ Item {
     var subscriptionName = root._subscriptionNameOverride
       || root.setupStoreRef.pubsubSubscriptionName || "lookout-events"
     if (root._skipVerifyFailedOnce) { root._finish(subscriptionName); return }
-    Sdm.getSubscription(root._accessToken, root.gcpProjectId, subscriptionName,
+    Sdm.getSubscription(http, root._accessToken, root.gcpProjectId, subscriptionName,
       function (ok, status, payload) {
         if (root.step !== "pubsub") return
         if (ok) { root._finish(subscriptionName); return }

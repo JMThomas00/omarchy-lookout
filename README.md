@@ -403,6 +403,19 @@ preview, when one exists -- same bearer access token as every other
 Google API call here, never a separate credential). No telemetry, no
 analytics, no other third-party endpoint of any kind.
 
+Every request has a hard deadline and an explicit abort path, so a peer
+that accepts a connection and never answers can't leave a credential-bearing
+call (or the setup step, Settings button, or go2rtc-readiness check waiting
+on it) hanging indefinitely. Every HTTP request made from QML -- the OAuth
+token exchange/refresh, camera discovery, subscription create/verify, and the
+loopback go2rtc readiness poll -- goes through the single
+`HttpRequester.qml`, which aborts on a timer (20s; 3s for the loopback
+poll) and reports a timeout through the same failure callback as any other
+error. This is a timer-driven `abort()` rather than `XMLHttpRequest.timeout`,
+which was confirmed not to be enforced by this Qt build. The Python helper's
+own requests (`urllib`, 20s) and the clip download (15s) are bounded the same
+way.
+
 ### File boundary
 
 Reads/writes only under `~/.config/lookout/`, `~/.local/state/lookout/`, and a
