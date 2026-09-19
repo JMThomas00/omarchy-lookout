@@ -349,6 +349,13 @@ Every process this plugin spawns, and its exact lifecycle:
 - **`bin/oauth-callback.py`** -- a single-use, hard-timeout (300s) loopback
   HTTP listener used only during setup/re-authorization, torn down the
   instant it's answered a request or the wizard component is destroyed.
+- **`bin/http-request.py`** -- one short-lived process per QML-side HTTP
+  request (token exchange/refresh, camera discovery, subscription
+  create/verify, and the loopback go2rtc readiness check), spawned through
+  `bin/supervise.sh` like every other helper. Takes the request, credentials
+  included, over stdin only; enforces its own origin allowlist, response-size
+  ceiling, and wall-clock deadline; exits when its stdin closes. See
+  [Network boundary](#network-boundary) for the details.
 - **`secret-tool`**, **`bin/keyring-store.sh`**, **`bin/pkce.sh`**,
   **`bin/go2rtc-verify.sh`** -- one-shot helpers, each with its own short
   deadline.
@@ -403,18 +410,54 @@ preview, when one exists -- same bearer access token as every other
 Google API call here, never a separate credential). No telemetry, no
 analytics, no other third-party endpoint of any kind.
 
-Every request has a hard deadline and an explicit abort path, so a peer
-that accepts a connection and never answers can't leave a credential-bearing
-call (or the setup step, Settings button, or go2rtc-readiness check waiting
-on it) hanging indefinitely. Every HTTP request made from QML -- the OAuth
-token exchange/refresh, camera discovery, subscription create/verify, and the
-loopback go2rtc readiness poll -- goes through the single
-`HttpRequester.qml`, which aborts on a timer (20s; 3s for the loopback
-poll) and reports a timeout through the same failure callback as any other
-error. This is a timer-driven `abort()` rather than `XMLHttpRequest.timeout`,
-which was confirmed not to be enforced by this Qt build. The Python helper's
-own requests (`urllib`, 20s) and the clip download (15s) are bounded the same
-way.
+**Bounded HTTP, enforced in a helper process, not in QML.** Every
+credential-bearing request the QML code makes -- the OAuth token
+exchange/refresh, camera discovery, and Pub/Sub subscription create/verify --
+runs through `bin/http-request.py` (via the single `HttpRequester.qml`)
+instead of QML's own `XMLHttpRequest`. That is deliberate, and confirmed
+rather than assumed: `XMLHttpRequest` buffers the *entire* response body
+inside the shared Quickshell process before any callback (and so any size
+check) can run, and this Qt build accepts `XMLHttpRequest.timeout` without
+ever enforcing it. The helper instead:
+
+- takes the request -- bearer token, client secret, refresh token and all --
+  as one JSON line on **stdin**, never argv or the environment (the same
+  boundary as every other credential here), and never logs it;
+- refuses any origin outside an exact allowlist: `oauth2.googleapis.com`,
+  `smartdevicemanagement.googleapis.com`, and `pubsub.googleapis.com` over
+  https, plus go2rtc's own loopback readiness endpoint (GET-only, and its
+  body -- which lists every stream's source URL, credentials included -- is
+  never read at all). Only `Authorization`/`Content-Type` headers, no CR/LF;
+- follows a redirect only within the **original origin**. Stock `urllib`
+  forwards the `Authorization` header to whatever host a redirect names
+  (tested directly, not assumed), which would hand the live token to any host
+  a compromised endpoint pointed at -- this applies to
+  `bin/pubsub-listener.py`'s requests and clip download too;
+- reads at most `max_bytes + 1` bytes (256 KiB for every Google response this
+  plugin makes; a device list, token, or subscription is a few KB) in chunks
+  under an overall wall-clock deadline, for **both success and error bodies**,
+  and treats reaching the limit as a refusal -- an oversized answer is never
+  truncated and handed to a JSON parser. The `read1`-based loop matters: a
+  plain `read(n)` blocks until all `n` bytes arrive, so a slow-drip response
+  (a byte at a time, each inside the per-socket timeout) would never let a
+  deadline check run;
+- caps what comes back a second time on the QML side (`BoundedProcess`'s
+  byte budget on the helper's own output), and `Sdm.js` then bounds the
+  device count (64) and every string it keeps, and requires the full
+  `enterprises/<id>/devices/<id>` resource-name shape rather than trusting
+  its last path segment;
+- exits the moment its stdin closes, so nothing outlives its caller: if the
+  owning UI component is destroyed mid-request (or Quickshell itself dies)
+  the pipe closes and the helper stops. This is the only reliable signal --
+  Quickshell's `Process` destructor kills its direct child (`supervise.sh`)
+  outright, before that child can clean up its own process group.
+
+A timeout, network failure, or refused response reaches the existing failure
+callbacks as an ordinary status-0 failure. The Python listener's own requests
+use the same bounded read and the same-origin-only redirect policy, and drop
+any Pub/Sub message that isn't a well-formed event (it also no longer raises
+on one, which would otherwise exit the listener and redeliver the same
+message forever).
 
 ### File boundary
 

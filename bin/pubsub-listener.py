@@ -64,6 +64,9 @@ MAX_STDIN_LINE_BYTES = 8192
 # than parsed.
 MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_MESSAGES_PER_PULL = 20
+# Device ids, event ids, trait names and ack ids are all short opaque strings
+# in reality; anything longer is not a real one and is dropped, not stored.
+MAX_ID_CHARS = 256
 # Drain quickly while there's a backlog; otherwise idle at this cadence.
 EMPTY_PULL_SLEEP_SECONDS = 12
 # How often a persistent pull failure (wrong subscription, permissions,
@@ -90,6 +93,29 @@ LAST_EVENT_CLIP_DIR = os.path.expanduser("~/.local/state/lookout/last-event")
 # would ask for (see linecast's own review history: "validate full argument
 # shapes, not just which function was called").
 _ALLOWED_CLIP_HOST = "nest-camera-frontend.googleapis.com"
+
+
+class _SameOriginRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only within the request's own origin.
+
+    Stock urllib forwards the Authorization header to whatever host a
+    redirect names (confirmed directly, not assumed), which would hand the
+    live Bearer token to any host a compromised endpoint pointed at -- and
+    the host check on `previewUrl` below only ever sees the FIRST url.
+    Refusing a cross-origin redirect makes urllib raise HTTPError for the
+    3xx itself, which every caller here already treats as a failed request.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        old, new = urllib.parse.urlsplit(req.full_url), urllib.parse.urlsplit(newurl)
+        if (old.scheme, old.netloc.lower()) != (new.scheme, new.netloc.lower()):
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+# ProxyHandler({}) explicitly: no proxy environment variable may reroute a
+# request that carries a credential.
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _SameOriginRedirect)
 
 _stop_requested = False
 
@@ -147,23 +173,48 @@ def _http_post_json(url, payload, access_token, timeout=HTTP_TIMEOUT_SECONDS):
     return _http_do(request, timeout)
 
 
+def _read_bounded(stream, limit, deadline):
+    """Bytes, or None if the body exceeds `limit` or the wall-clock deadline
+    passes first. Reads at most limit + 1 bytes.
+
+    read1, not read: read(n) blocks until all n bytes arrive, so a slow-drip
+    response (a byte at a time, each inside the per-socket timeout) would
+    never let a deadline check run between reads.
+    """
+    read = getattr(stream, "read1", stream.read)
+    chunks = []
+    total = 0
+    while True:
+        if time.monotonic() >= deadline:
+            return None
+        chunk = read(min(8192, limit + 1 - total))
+        if not chunk:
+            return b"".join(chunks)
+        total += len(chunk)
+        if total > limit:
+            return None
+        chunks.append(chunk)
+
+
 def _http_do(request, timeout):
+    deadline = time.monotonic() + timeout
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read(MAX_RESPONSE_BYTES + 1)
-            if len(raw) > MAX_RESPONSE_BYTES:
-                return 599, None
-            return response.status, json.loads(raw or b"{}")
+        with _OPENER.open(request, timeout=timeout) as response:
+            status = response.status
+            raw = _read_bounded(response, MAX_RESPONSE_BYTES, deadline)
     except urllib.error.HTTPError as error:
-        try:
-            raw = error.read(MAX_RESPONSE_BYTES + 1)
-            payload = json.loads(raw) if raw and len(raw) <= MAX_RESPONSE_BYTES else None
-        except (json.JSONDecodeError, ValueError):
-            payload = None
-        return error.code, payload
+        # Error bodies get exactly the same ceiling as success bodies.
+        status = error.code
+        raw = _read_bounded(error, MAX_RESPONSE_BYTES, deadline)
     except (urllib.error.URLError, TimeoutError, OSError) as error:
         _log(f"request failed: {error}")
         return 0, None
+    if raw is None:
+        return (599 if status < 400 else status), None
+    try:
+        return status, json.loads(raw or b"{}")
+    except (json.JSONDecodeError, ValueError):
+        return status, None
 
 
 class TokenManager:
@@ -216,25 +267,35 @@ def _device_id_from_resource_name(name):
 def _decode_message_body(message):
     try:
         data_raw = base64.b64decode(message.get("data", ""))
-        return json.loads(data_raw)
+        body = json.loads(data_raw)
     except (ValueError, TypeError, json.JSONDecodeError):
         return None
+    # A message that decodes to anything but an object (a list, a string) is
+    # not an SDM event; dropping it here is what keeps the callers below from
+    # raising on it -- an unhandled error exits this process, and an unacked
+    # message is redelivered, which would make it a crash loop.
+    return body if isinstance(body, dict) else None
 
 
 def _process_message(body):
     """Yield zero or more bounded event dicts for one already-decoded message body."""
-    resource_update = body.get("resourceUpdate") or {}
+    resource_update = body.get("resourceUpdate")
+    if not isinstance(resource_update, dict):
+        return
     device_id = _device_id_from_resource_name(resource_update.get("name"))
     if not device_id:
         return
-    events = resource_update.get("events") or {}
-    timestamp = body.get("timestamp") or ""
+    events = resource_update.get("events")
+    if not isinstance(events, dict):
+        return
+    timestamp = str(body.get("timestamp") or "")[:64]
     for trait_key, event_body in events.items():
         # e.g. "sdm.devices.events.CameraMotion.Motion" -> "CameraMotion"
         parts = str(trait_key).split(".")
         trait = parts[-2] if len(parts) >= 2 else str(trait_key)
-        event_id = str((event_body or {}).get("eventId") or "")
-        if not event_id:
+        event_id = str(event_body.get("eventId") or "") if isinstance(event_body, dict) else ""
+        if not event_id or len(event_id) > MAX_ID_CHARS or len(device_id) > MAX_ID_CHARS \
+                or len(trait) > MAX_ID_CHARS:
             continue
         yield {
             "type": "event",
@@ -258,16 +319,20 @@ def _sanitize_device_id(device_id):
 
 def _extract_clip_preview(body):
     """Returns (deviceId, previewUrl) if this message carries a clip preview, else (None, None)."""
-    resource_update = body.get("resourceUpdate") or {}
+    resource_update = body.get("resourceUpdate")
+    if not isinstance(resource_update, dict):
+        return None, None
     device_id = _device_id_from_resource_name(resource_update.get("name"))
-    if not device_id:
+    if not device_id or len(device_id) > MAX_ID_CHARS:
         return None, None
-    events = resource_update.get("events") or {}
+    events = resource_update.get("events")
+    if not isinstance(events, dict):
+        return None, None
     clip = events.get("sdm.devices.events.CameraClipPreview.ClipPreview")
-    preview_url = (clip or {}).get("previewUrl")
-    if not device_id or not preview_url:
+    preview_url = clip.get("previewUrl") if isinstance(clip, dict) else None
+    if not isinstance(preview_url, str) or not preview_url:
         return None, None
-    return device_id, str(preview_url)
+    return device_id, preview_url
 
 
 def _download_clip_preview(preview_url, access_token, device_id):
@@ -288,10 +353,11 @@ def _download_clip_preview(preview_url, access_token, device_id):
         request = urllib.request.Request(
             preview_url, headers={"Authorization": f"Bearer {access_token}"},
         )
-        with urllib.request.urlopen(request, timeout=CLIP_HTTP_TIMEOUT_SECONDS) as response:
-            raw = response.read(MAX_CLIP_BYTES + 1)
-        if len(raw) > MAX_CLIP_BYTES:
-            _log(f"clip preview for {device_id} exceeded the size budget, discarded")
+        deadline = time.monotonic() + CLIP_HTTP_TIMEOUT_SECONDS
+        with _OPENER.open(request, timeout=CLIP_HTTP_TIMEOUT_SECONDS) as response:
+            raw = _read_bounded(response, MAX_CLIP_BYTES, deadline)
+        if raw is None:
+            _log(f"clip preview for {device_id} exceeded the size or time budget, discarded")
             return
         final_path = os.path.join(LAST_EVENT_CLIP_DIR, _sanitize_device_id(device_id) + ".mp4")
         tmp_path = final_path + ".tmp"
@@ -348,15 +414,25 @@ def run(credentials):
             time.sleep(EMPTY_PULL_SLEEP_SECONDS)
             continue
 
-        messages = payload.get("receivedMessages") or []
+        messages = payload.get("receivedMessages")
+        # Bounded even though this request asked for MAX_MESSAGES_PER_PULL:
+        # the response is untrusted input, and an unacked message is simply
+        # redelivered, so processing only the first N loses nothing.
+        messages = messages[:MAX_MESSAGES_PER_PULL] if isinstance(messages, list) else []
         if not messages:
             time.sleep(EMPTY_PULL_SLEEP_SECONDS)
             continue
 
         ack_ids = []
         for received in messages:
+            if not isinstance(received, dict):
+                continue
             ack_id = received.get("ackId")
-            message = received.get("message") or {}
+            if not isinstance(ack_id, str) or len(ack_id) > MAX_ID_CHARS:
+                ack_id = None
+            message = received.get("message")
+            if not isinstance(message, dict):
+                message = {}
             body = _decode_message_body(message)
             if body is not None:
                 for event in _process_message(body):

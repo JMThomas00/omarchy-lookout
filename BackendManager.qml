@@ -487,7 +487,10 @@ Item {
     // "starting") waiting forever, since no retry is scheduled until a
     // response or an error actually arrives. A timeout counts as a failed
     // attempt like any other (status 0).
-    http.request({ method: "GET", url: "http://127.0.0.1:1984/api/streams", timeoutMs: 3000 },
+    // discardBody: only the status matters here, and this endpoint's body
+    // lists every stream's source URL -- credentials included -- so it is
+    // never read at all, let alone handed to QML.
+    http.request({ method: "GET", url: "http://127.0.0.1:1984/api/streams", timeoutMs: 3000, discardBody: true },
       function (status) {
         if (!go2rtcProc.running) return
         if (status >= 200 && status < 300) {

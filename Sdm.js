@@ -3,15 +3,16 @@
 // Thin REST wrappers around the Smart Device Management (SDM) API and the
 // Pub/Sub subscription-management calls the setup wizard needs once. Every
 // function here takes an already-valid access token and calls back with
-// (ok, result) -- none of these ever touch a subprocess, so a bearer token
-// never has a chance to land on any process's argv or environment.
+// (ok, status, payload).
 //
 // Every function's first argument is an HttpRequester.qml instance, which is
-// what actually makes the request -- it owns the hard deadline and abort
-// path (a plain XMLHttpRequest here would have neither; see that file for
-// why this can't just live in this .pragma library itself). A timeout or
-// network failure comes back through the same callback as any other
-// failure: ok=false, status=0, payload=null.
+// what actually makes the request: it runs each one in a bounded helper
+// process (bin/http-request.py) that takes the request -- bearer token
+// included -- over stdin only, never argv or the environment, and enforces
+// the response-size ceiling and the deadline before QML sees anything. A
+// timeout, network failure, or refused (oversized/disallowed) request comes
+// back through the same callback as any other failure: ok=false, status=0,
+// payload=null.
 
 var SDM_BASE = "https://smartdevicemanagement.googleapis.com/v1"
 var PUBSUB_BASE = "https://pubsub.googleapis.com/v1"
@@ -42,32 +43,57 @@ function _request(http, method, url, accessToken, body, callback) {
 // supportedProtocols: ["WEB_RTC"] or ["RTSP"] depending on which app the
 // camera is migrated to (see README's Requirements section). A camera with
 // neither trait present is skipped: it isn't a live-viewable camera at all.
+// Everything in the response is treated as untrusted input even though the
+// body has already been size-capped by the helper process that fetched it
+// (bin/http-request.py): a device count and every string that ends up in a
+// file path, a go2rtc stream key, a notification, or the UI is bounded and
+// shape-checked here, so a response that is merely small enough still can't
+// smuggle in an unbounded list or a path/config-hostile identifier.
+var MAX_DEVICES = 64
+var MAX_NAME_CHARS = 100
+// The FULL resource name, not just its last segment: taking only the tail of
+// an arbitrary string would happily accept "anything/at/all/x" as device "x".
+var DEVICE_NAME_PATTERN = /^enterprises\/[A-Za-z0-9_-]{1,128}\/devices\/([A-Za-z0-9_-]{1,256})$/
+
+function _boundedString(value, fallback) {
+  var text = typeof value === "string" ? value : ""
+  if (!text) return fallback
+  return text.length > MAX_NAME_CHARS ? text.substring(0, MAX_NAME_CHARS) : text
+}
+
 function listCameras(http, accessToken, deviceAccessProjectId, callback) {
   var url = SDM_BASE + "/enterprises/" + encodeURIComponent(deviceAccessProjectId) + "/devices"
   _request(http, "GET", url, accessToken, undefined, function (ok, status, payload) {
     if (!ok || !payload) { callback(false, status, [], payload); return }
-    var devices = payload.devices || []
+    var devices = Array.isArray(payload.devices) ? payload.devices : []
     var cameras = []
-    for (var i = 0; i < devices.length; i++) {
+    var scanned = Math.min(devices.length, MAX_DEVICES)
+    for (var i = 0; i < scanned; i++) {
       var device = devices[i]
+      if (!device || typeof device !== "object") continue
       if (CAMERA_TYPES.indexOf(device.type) === -1) continue
-      var traits = device.traits || {}
+      var traits = device.traits && typeof device.traits === "object" ? device.traits : {}
       var liveStream = traits["sdm.devices.traits.CameraLiveStream"]
       if (!liveStream) continue
-      var protocols = liveStream.supportedProtocols || []
+      var protocols = Array.isArray(liveStream.supportedProtocols) ? liveStream.supportedProtocols : []
       var protocol = protocols.indexOf("WEB_RTC") !== -1 ? "webrtc"
         : (protocols.indexOf("RTSP") !== -1 ? "rtsp" : "")
       if (!protocol) continue
-      var nameParts = String(device.name || "").split("/")
-      var deviceId = nameParts[nameParts.length - 1]
-      if (!deviceId) continue
+      // Device IDs become file names and go2rtc stream keys -- anything that
+      // isn't exactly the documented resource-name shape, in the URL-safe
+      // alphabet a real one uses, is dropped, not sanitized into something
+      // that might collide with a real device.
+      var nameMatch = DEVICE_NAME_PATTERN.exec(typeof device.name === "string" ? device.name : "")
+      if (!nameMatch) continue
+      var deviceId = nameMatch[1]
       var info = traits["sdm.devices.traits.Info"] || {}
       var roomInfo = traits["sdm.devices.traits.RoomInfo"] || {}
+      var parent = Array.isArray(device.parentRelations) && device.parentRelations[0]
+        ? device.parentRelations[0] : {}
       cameras.push({
         deviceId: deviceId,
-        displayName: info.customName || device.parentRelations && device.parentRelations[0]
-          && device.parentRelations[0].displayName || deviceId,
-        room: roomInfo.roomName || "",
+        displayName: _boundedString(info.customName, _boundedString(parent.displayName, deviceId)),
+        room: _boundedString(roomInfo.roomName, ""),
         protocol: protocol
       })
     }

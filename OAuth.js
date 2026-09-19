@@ -120,10 +120,19 @@ function responseError(status, payload, fallback) {
       message = payload.message || ""
     }
   }
-  if (!message && status === 0) message = "No response from Google (the request timed out or the network is unreachable)"
+  // status 0 covers every case where no usable response arrived: a timeout,
+  // an unreachable network, or a response refused for exceeding the size
+  // ceiling -- the request helper deliberately doesn't say which.
+  if (!message && status === 0) message = "No usable response from Google (the request timed out, the network is unreachable, or the response was refused)"
   if (!message) message = fallback || "Google could not complete this request"
+  // Whatever Google (or something impersonating it) put in an error message
+  // is coerced to text and bounded before it reaches the UI.
+  message = String(message)
+  if (message.length > MAX_ERROR_CHARS) message = message.substring(0, MAX_ERROR_CHARS) + "…"
   return redact(message)
 }
+
+var MAX_ERROR_CHARS = 300
 
 // Google's token endpoint response shape is the same for both the
 // authorization_code and refresh_token grants used here.
@@ -145,12 +154,14 @@ function parseTokenResponse(status, text, previousRefreshToken) {
 }
 
 // The one place either token grant (authorization_code during setup,
-// refresh_token afterward) is actually sent, in-process -- never a
-// subprocess, since nothing is safer than never spawning a process for a
-// secret at all. `http` is an HttpRequester.qml instance, which owns the
-// hard deadline and abort path (a plain XMLHttpRequest here would have
-// neither); a timeout or network failure comes back through `callback` as
-// an ordinary {ok: false, error} result, same as any other failure.
+// refresh_token afterward) is actually sent. `http` is an HttpRequester.qml
+// instance: the client secret / code / refresh token travel in the request
+// body to a bounded helper process (bin/http-request.py) over its stdin --
+// never argv or the environment -- and that helper owns the deadline and the
+// response-size ceiling, so a stalled or oversized answer never reaches this
+// process's memory. A timeout, network failure, or refused response comes
+// back through `callback` as an ordinary {ok: false, error} result, same as
+// any other failure.
 function _postTokenRequest(http, fields, previousRefreshToken, callback) {
   http.request({
     method: "POST",
