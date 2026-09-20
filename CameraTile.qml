@@ -189,6 +189,7 @@ Item {
     }
 
     Text {
+      textFormat: Text.PlainText
       anchors.centerIn: parent
       // Only shown before the very first successful frame ever, and only
       // when there's no clip to show instead -- once a camera has shown
@@ -217,6 +218,7 @@ Item {
 
       Text {
         id: lastEventText
+        textFormat: Text.PlainText
         anchors.centerIn: parent
         text: root.lastEvent
           ? (Notify.labelForShortTrait(root.lastEvent.trait) + " · " + Notify.timeAgo(root.lastEvent.lastMs, Date.now()))
@@ -234,6 +236,7 @@ Item {
       color: "#A0000000"
 
       Text {
+        textFormat: Text.PlainText
         anchors.centerIn: parent
         text: "Connecting…"
         color: "white"
@@ -248,11 +251,17 @@ Item {
       anchors.margins: 4
       radius: 3
       color: "#B0000000"
-      width: nameText.implicitWidth + 8
+      width: nameText.width + 8
       height: nameText.implicitHeight + 4
 
       Text {
         id: nameText
+        textFormat: Text.PlainText
+        // Names come from Google (up to 100 chars, Sdm.js) -- an untrusted
+        // length must not push this pill past its own tile and over the
+        // neighboring one, so it elides at the tile's width instead.
+        width: Math.min(implicitWidth, root.tileWidth - 24)
+        elide: Text.ElideRight
         anchors.centerIn: parent
         text: root.displayName
         color: "white"
@@ -273,6 +282,7 @@ Item {
 
       Text {
         id: countText
+        textFormat: Text.PlainText
         anchors.centerIn: parent
         text: String(root.unseenCount)
         color: "white"

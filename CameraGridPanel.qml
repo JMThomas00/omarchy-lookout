@@ -132,6 +132,7 @@ Item {
 
     Text {
       id: gearText
+      textFormat: Text.PlainText
       anchors.centerIn: parent
       text: ""
       color: "white"
@@ -154,6 +155,7 @@ Item {
 
     Text {
       id: statusText
+      textFormat: Text.PlainText
       width: parent.width
       visible: text.length > 0
       color: Color.urgent
@@ -163,6 +165,7 @@ Item {
     }
 
     Text {
+      textFormat: Text.PlainText
       visible: root.backendManagerRef.backendState === "verifying" || root.backendManagerRef.backendState === "starting"
       text: "Connecting to your cameras…"
       color: Color.muted
@@ -233,6 +236,7 @@ Item {
 
     Text {
       id: noCamerasText
+      textFormat: Text.PlainText
       visible: root.cameraListStoreRef.visibleCamerasSorted.length === 0 && root.backendManagerRef.running
       text: "No cameras to show. Check Settings to unhide a camera."
       color: Color.muted

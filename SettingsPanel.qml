@@ -87,6 +87,7 @@ Item {
   }
 
   component SectionHeading: Text {
+    textFormat: Text.PlainText
     font.family: Style.font.family
     font.pixelSize: Style.font.body
     font.bold: true
@@ -94,6 +95,7 @@ Item {
   }
 
   component HelpText: Text {
+    textFormat: Text.PlainText
     width: parent ? parent.width : implicitWidth
     wrapMode: Text.WordWrap
     color: Color.muted
@@ -111,6 +113,7 @@ Item {
       spacing: Style.spacing.sm
       Button { text: "← Back"; onClicked: root.backRequested() }
       Text {
+        textFormat: Text.PlainText
         text: "Settings"
         font.family: Style.font.family
         font.pixelSize: Style.font.title
@@ -144,6 +147,11 @@ Item {
           Row {
             width: parent.width
             Text {
+              textFormat: Text.PlainText
+              // Untrusted length (see CameraTile's name label): elide rather
+              // than run off the popup's edge, leaving room for Show/Hide.
+              width: Math.min(implicitWidth, cameraRow.width - 90)
+              elide: Text.ElideRight
               text: cameraRow.camera.displayName + (cameraRow.camera.room ? (" (" + cameraRow.camera.room + ")") : "")
               color: Color.foreground
               font.family: Style.font.family
@@ -188,6 +196,7 @@ Item {
       Row {
         spacing: Style.spacing.sm
         Text {
+          textFormat: Text.PlainText
           text: "Thumbnail size"
           color: Color.foreground
           font.family: Style.font.family
@@ -199,6 +208,7 @@ Item {
           onClicked: root.settingsStoreRef.setThumbnailWidth(root.settingsStoreRef.thumbnailWidth - 20)
         }
         Text {
+          textFormat: Text.PlainText
           text: root.settingsStoreRef.thumbnailWidth + "px"
           color: Color.foreground
           font.family: Style.font.family
@@ -263,6 +273,7 @@ Item {
       Row {
         spacing: Style.spacing.sm
         Text {
+          textFormat: Text.PlainText
           text: "Notification cooldown"
           color: Color.foreground
           font.family: Style.font.family
@@ -275,6 +286,7 @@ Item {
           onEditingFinished: root.settingsStoreRef.setDedupeWindowSeconds(parseInt(text) || 60)
         }
         Text {
+          textFormat: Text.PlainText
           text: "seconds"
           color: Color.muted
           font.family: Style.font.family
@@ -289,6 +301,7 @@ Item {
       Row {
         spacing: Style.spacing.sm
         Text {
+          textFormat: Text.PlainText
           text: "Camera bridge shutdown delay"
           color: Color.foreground
           font.family: Style.font.family
@@ -301,6 +314,7 @@ Item {
           onEditingFinished: root.settingsStoreRef.setIdleTeardownSeconds(parseInt(text) || 15)
         }
         Text {
+          textFormat: Text.PlainText
           text: "seconds"
           color: Color.muted
           font.family: Style.font.family
@@ -321,6 +335,7 @@ Item {
         }
       }
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         visible: root._testStatus.length > 0
         text: root._testStatus

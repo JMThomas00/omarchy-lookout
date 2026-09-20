@@ -322,6 +322,7 @@ BarWidget {
 
       Text {
         id: badgeText
+        textFormat: Text.PlainText
         anchors.centerIn: parent
         text: String(root.unseenCount)
         color: Color.background

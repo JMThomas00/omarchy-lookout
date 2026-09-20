@@ -31,6 +31,7 @@ Item {
     spacing: Style.spacing.md
 
     Text {
+      textFormat: Text.PlainText
       width: parent.width
       text: "Lookout can't start"
       font.family: Style.font.family
@@ -41,6 +42,7 @@ Item {
     }
 
     Text {
+      textFormat: Text.PlainText
       width: parent.width
       text: root.reason
       font.family: Style.font.family
@@ -50,6 +52,7 @@ Item {
     }
 
     Text {
+      textFormat: Text.PlainText
       visible: root.showGo2rtcHint
       width: parent.width
       text: "Install go2rtc from the AUR (go2rtc-bin, not go2rtc -- see README.md's "

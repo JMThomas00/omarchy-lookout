@@ -55,8 +55,16 @@ var MAX_NAME_CHARS = 100
 // an arbitrary string would happily accept "anything/at/all/x" as device "x".
 var DEVICE_NAME_PATTERN = /^enterprises\/[A-Za-z0-9_-]{1,128}\/devices\/([A-Za-z0-9_-]{1,256})$/
 
+// Control characters, zero-width characters, and the bidirectional
+// override/isolate controls (which can visually reorder or hide text, e.g. a
+// name that DISPLAYS as something it isn't). None belong in a camera name;
+// each becomes a plain space. Everything that renders these strings also
+// forces Text.PlainText, so markup is never interpreted either -- this is
+// the second layer, at ingestion.
+var UNSAFE_NAME_CHARS = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g
+
 function _boundedString(value, fallback) {
-  var text = typeof value === "string" ? value : ""
+  var text = typeof value === "string" ? value.replace(UNSAFE_NAME_CHARS, " ").trim() : ""
   if (!text) return fallback
   return text.length > MAX_NAME_CHARS ? text.substring(0, MAX_NAME_CHARS) : text
 }

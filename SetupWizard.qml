@@ -335,6 +335,7 @@ Item {
     spacing: Style.spacing.md
 
     Text {
+      textFormat: Text.PlainText
       width: parent.width
       text: root.reauthorizing ? "Lookout: sign in again" : "Lookout setup"
       font.family: Style.font.family
@@ -344,6 +345,7 @@ Item {
     }
 
     Text {
+      textFormat: Text.PlainText
       visible: root.errorMessage.length > 0
       width: parent.width
       text: root.errorMessage
@@ -360,6 +362,7 @@ Item {
       spacing: Style.spacing.sm
 
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         wrapMode: Text.WordWrap
         color: Color.muted
@@ -377,6 +380,7 @@ Item {
         selectByMouse: true
       }
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         wrapMode: Text.WordWrap
         color: Color.muted
@@ -391,6 +395,7 @@ Item {
           + "in your project -- it does not create one for you."
       }
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         wrapMode: Text.WordWrap
         color: Color.muted
@@ -432,6 +437,7 @@ Item {
       spacing: Style.spacing.sm
 
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         color: Color.muted
         wrapMode: Text.WordWrap
@@ -457,6 +463,7 @@ Item {
       spacing: Style.spacing.sm
 
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         wrapMode: Text.WordWrap
         color: Color.muted
@@ -476,6 +483,7 @@ Item {
         width: parent.width
         spacing: Style.spacing.sm
         Text {
+          textFormat: Text.PlainText
           text: "Subscription name:"
           color: Color.foreground
           font.family: Style.font.family

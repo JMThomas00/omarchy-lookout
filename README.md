@@ -482,6 +482,32 @@ everything else in
 (clearing the keyring entry) that removing the plugin directory doesn't
 cover.
 
+### Untrusted text
+
+Camera names, room names, event labels, and API/process error text all
+originate outside this plugin (Google's responses, subprocess output), so
+none of them is ever interpreted as markup. QML's `Text` defaults to
+`Text.AutoText`, which *auto-detects* rich text -- a name like
+`<font size="7">…</font><img src="…">` would be rendered as formatting and an
+image rather than shown literally (tested against this Qt build, not
+assumed). Every `Text` in this plugin sets `textFormat: Text.PlainText`,
+including the ones that only ever show static strings, so a future edit that
+routes external data into one can't reintroduce it. Omarchy's own shared
+components follow the same rule (`qs.Ui`'s `Button`/`WidgetButton` set
+`PlainText`, and its notification card renders the summary -- where the
+camera name goes -- as `PlainText` for exactly this reason; the notification
+body is a fixed string).
+
+As a second layer, `Sdm.js` bounds and cleans names at ingestion: at most 64
+devices, names/rooms capped at 100 characters, control characters,
+zero-width characters, and bidirectional override/isolate controls (which can
+visually reorder text so a name *displays* as something it isn't) replaced
+with spaces, and device IDs required to match the full
+`enterprises/<id>/devices/<id>` shape in the URL-safe alphabet before they
+are ever used in a file path or go2rtc stream key. Because names are
+untrusted lengths, the tile label and Settings row elide instead of running
+past their container.
+
 ## License
 
 MIT -- see [LICENSE](LICENSE). A handful of files were adapted from other
